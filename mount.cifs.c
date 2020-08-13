@@ -46,6 +46,9 @@
 #include <time.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#ifdef HAVE_KRB5PAM
+#include <security/pam_appl.h>
+#endif /* HAVE_KRB5PAM */
 #ifdef HAVE_SYS_FSUID_H
 #include <sys/fsuid.h>
 #endif /* HAVE_SYS_FSUID_H */
@@ -163,6 +166,7 @@
 #define OPT_BKUPGID    31
 #define OPT_NOFAIL     32
 #define OPT_SNAPSHOT   33
+#define OPT_FORCE_PAM  34
 
 #define MNT_TMP_FILE "/.mtab.cifs.XXXXXX"
 
@@ -189,6 +193,8 @@ struct parsed_mount_info {
 	unsigned int verboseflag:1;
 	unsigned int nofail:1;
 	unsigned int got_domain:1;
+	unsigned int is_krb5:1;
+	unsigned int force_pam:1;
 };
 
 static const char *thisprogram;
@@ -713,6 +719,8 @@ static int parse_opt_token(const char *token)
 		return OPT_PASS;
 	if (strcmp(token, "sec") == 0)
 		return OPT_SEC;
+	if (strcmp(token, "force_pam") == 0)
+		return OPT_FORCE_PAM;
 	if (strcmp(token, "ip") == 0 ||
 		strcmp(token, "addr") == 0)
 		return OPT_IP;
@@ -891,12 +899,19 @@ parse_options(const char *data, struct parsed_mount_info *parsed_info)
 
 		case OPT_SEC:
 			if (value) {
-				if (!strncmp(value, "none", 4) ||
-				    !strncmp(value, "krb5", 4))
+				if (!strncmp(value, "none", 4))
 					parsed_info->got_password = 1;
+				if (!strncmp(value, "krb5", 4))
+					parsed_info->is_krb5 = 1;
 			}
 			break;
 
+#ifdef HAVE_KRB5PAM
+		case OPT_FORCE_PAM:
+			parsed_info->force_pam = 1;
+			goto nocopy;
+#endif /* HAVE_KRB5PAM */
+			
 		case OPT_IP:
 			if (!value || !*value) {
 				fprintf(stderr,
@@ -1809,6 +1824,119 @@ get_password(const char *prompt, char *input, int capacity)
 	return input;
 }
 
+#ifdef HAVE_KRB5PAM
+#define PAM_CIFS_SERVICE "cifs"
+
+static int
+pam_auth_krb5_conv(int n, const struct pam_message **msg,
+    struct pam_response **resp, void *data)
+{
+    struct parsed_mount_info *parsed_info;
+	struct pam_response *reply;
+	int i;
+
+	*resp = NULL;
+
+    parsed_info = data;
+    if (parsed_info == NULL)
+		return (PAM_CONV_ERR);
+
+	if (n <= 0 || n > PAM_MAX_NUM_MSG)
+		return (PAM_CONV_ERR);
+
+	if ((reply = calloc(n, sizeof(*reply))) == NULL)
+		return (PAM_CONV_ERR);
+
+	for (i = 0; i < n; ++i) {
+		switch (msg[i]->msg_style) {
+		case PAM_PROMPT_ECHO_OFF:
+            if ((reply[i].resp = (char *) malloc(MOUNT_PASSWD_SIZE + 1)) == NULL)
+                goto fail;
+
+            if (parsed_info->got_password && parsed_info->password != NULL) {
+                strncpy(reply[i].resp, parsed_info->password, MOUNT_PASSWD_SIZE + 1);
+            } else if (get_password(msg[i]->msg, reply[i].resp, MOUNT_PASSWD_SIZE + 1) == NULL) {
+                goto fail;
+            }
+            reply[i].resp[MOUNT_PASSWD_SIZE] = '\0';
+
+			reply[i].resp_retcode = PAM_SUCCESS;
+			break;
+		case PAM_PROMPT_ECHO_ON:
+			fprintf(stderr, "%s: ", msg[i]->msg);
+            if ((reply[i].resp = (char *) malloc(MOUNT_PASSWD_SIZE + 1)) == NULL)
+                goto fail;
+
+			if (fgets(reply[i].resp, MOUNT_PASSWD_SIZE + 1, stdin) == NULL)
+                goto fail;
+
+            reply[i].resp[MOUNT_PASSWD_SIZE] = '\0';
+
+			reply[i].resp_retcode = PAM_SUCCESS;
+			break;
+		case PAM_ERROR_MSG:
+		case PAM_TEXT_INFO:
+			fprintf(stderr, "%s: ", msg[i]->msg);
+
+			reply[i].resp_retcode = PAM_SUCCESS;
+			break;
+		default:
+			goto fail;
+		}
+	}
+	*resp = reply;
+	return (PAM_SUCCESS);
+
+ fail:
+	for(i = 0; i < n; i++) {
+        if (reply[i].resp)
+            free(reply[i].resp);
+	}
+	free(reply);
+	return (PAM_CONV_ERR);
+}
+
+static int 
+pam_auth_krb5_user(struct parsed_mount_info *parsed_info)
+{
+    int rc = -1;
+    pam_handle_t *pamh = NULL;
+    struct pam_conv pam_conv = {
+        .conv = pam_auth_krb5_conv,
+        .appdata_ptr = (void *) parsed_info
+    };
+    
+    fprintf(stdout, "Authenticating as user: %s\n", parsed_info->username);
+    rc = pam_start(PAM_CIFS_SERVICE, parsed_info->username, &pam_conv, &pamh);
+    if (rc != PAM_SUCCESS) {
+        fprintf(stderr, "Error starting PAM transaction: %s\n", pam_strerror(pamh, rc));
+        return rc;
+    }
+
+    rc = pam_authenticate(pamh, 0);
+    if (rc != PAM_SUCCESS) {
+        fprintf(stderr, "Error in authenticating user with PAM: %s\n", pam_strerror(pamh, rc));
+        goto end;
+    }
+
+    rc = pam_acct_mgmt(pamh, 0);
+    if (rc != PAM_SUCCESS) {
+        fprintf(stderr, "User account invalid: %s\n", pam_strerror(pamh, rc));
+        goto end;
+    }
+
+    rc = pam_setcred(pamh, PAM_ESTABLISH_CRED);
+    if (rc != PAM_SUCCESS) {
+        fprintf(stderr, "Error in setting PAM credentials: %s\n", pam_strerror(pamh, rc));
+        goto end;
+    }
+
+end:
+    pam_end(pamh, rc);
+    return rc;
+}
+#endif /* HAVE_KRB5PAM */
+
 static int
 assemble_mountinfo(struct parsed_mount_info *parsed_info,
 		   const char *thisprogram, const char *mountpoint,
@@ -1891,7 +2019,30 @@ assemble_mountinfo(struct parsed_mount_info *parsed_info,
 		parsed_info->got_user = 1;
 	}
 
-	if (!parsed_info->got_password) {
+#ifdef HAVE_KRB5PAM
+	if (parsed_info->is_krb5 && parsed_info->force_pam) {
+		/* 
+		 * Attempt to authenticate with PAM. 
+		 * If PAM is configured properly, let it get the krb5 tickets necessary for the mount.
+		 * Even if this fails, it could be the case of PAM not configured properly. 
+		 * In that case, retain the current behavior. So this is just a best-effort.
+		 */
+		rc = pam_auth_krb5_user(parsed_info);
+		if (rc) {
+			fprintf(stderr, "Attempt to authenticate user with " \
+					"PAM unsuccessful. Still, proceeding with mount.\n");
+            /*
+             * Even if this is a failure, fallthrough and see if cifs.ko can still 
+             * authenticate the user.
+             */
+		}
+
+		parsed_info->got_password = 1;
+	}
+#endif /* HAVE_KRB5PAM */
+
+	/* If sec=krb5, then password is collected by other means */
+	if (!parsed_info->is_krb5 && !parsed_info->got_password) {
 		char tmp_pass[MOUNT_PASSWD_SIZE + 1];
 		char *prompt = NULL;
 

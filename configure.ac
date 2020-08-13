@@ -55,6 +55,11 @@ AC_ARG_ENABLE(pam,
 	enable_pam=$enableval,
 	enable_pam="maybe")
 
+AC_ARG_ENABLE(krb5pam,
+    [AS_HELP_STRING([--enable-krb5pam],[Add PAM authentication support when using sec=krb5 @<:@default=yes@])],,
+    enable_krb5pam=$enableval
+    enable_krb5pam="yes")
+
 AC_ARG_ENABLE(systemd,
 	[AS_HELP_STRING([--enable-systemd],[Enable systemd specific behavior for mount.cifs @<:@default=yes@:>@])],
 	enable_systemd=$enableval,
@@ -241,6 +246,27 @@ if test $enable_pam != "no"; then
 			])
 fi
 
+if test "x$enable_krb5pam" = "xno"; then
+	enable_krb5pam="no"
+else
+	AC_CHECK_LIB([pam], [pam_start], enable_krb5pam="yes", enable_krb5pam="no", )
+	AC_CHECK_HEADERS([security/pam_appl.h], ,
+			 [
+				if test $enable_krb5pam = "yes"; then
+					AC_MSG_ERROR([security/pam_appl.h not found, consider installing keyutils-libs-devel.])
+				else
+					AC_MSG_WARN([security/pam_appl.h not found, consider installing pam-devel. Disabling cifscreds PAM module.])
+					enable_krb5pam="no"
+				fi
+			 ])
+fi
+
+if test "$enable_krb5pam" = "yes"; then
+	AC_DEFINE([HAVE_KRB5PAM],[1], [Define if PAM auth is enabled for krb5])
+	LIBPAM=-lpam
+	AC_SUBST(LIBPAM)
+fi
+
 # ugly, but I'm not sure how to check for functions in a library that's not in $LIBS
 cu_saved_libs=$LIBS
 LIBS="$LIBS $KRB5_LDADD"
@@ -288,6 +314,7 @@ AM_CONDITIONAL(CONFIG_CIFSACL, [test "$enable_cifsacl" != "no"])
 AM_CONDITIONAL(CONFIG_SMBINFO, [test "$enable_smbinfo" != "no"])
 AM_CONDITIONAL(CONFIG_PYTHON_TOOLS, [test "$enable_pythontools" != "no"])
 AM_CONDITIONAL(CONFIG_PAM, [test "$enable_pam" != "no"])
+AM_CONDITIONAL(CONFIG_KRB5PAM, [test "$enable_krb5pam" != "no"])
 AM_CONDITIONAL(CONFIG_PLUGIN, [test "$enable_cifsidmap" != "no" -o "$enable_cifsacl" != "no"])
 
 LIBCAP_NG_PATH
