@@ -67,6 +67,7 @@
 static krb5_context	context;
 static const char	*prog = "cifs.upcall";
 
+#define DEBUG_SLEEP 10
 #define DNS_RESOLVER_DEFAULT_TIMEOUT 600 /* 10 minutes */
 
 typedef enum _sectype {
@@ -364,6 +365,8 @@ switch_to_process_ns(pid_t pid)
 			 */
 			err = errno;
 			rc = -1;
+			syslog(LOG_DEBUG, "%s: open(%s) failed: %d %s\n",
+			       __func__, namespace_files[n].name, err, strerror(errno));
 			goto out;
 		}
 
@@ -376,6 +379,7 @@ switch_to_process_ns(pid_t pid)
 		if (namespace_files[n].fd < 0)
 			continue;
 
+		syslog(LOG_DEBUG, "%s: switching %s ns", __func__, namespace_files[n].name);
 		rc = setns(namespace_files[n].fd, namespace_files[n].nstype);
 
 		if (rc < 0) {
@@ -1113,7 +1117,7 @@ lowercase_string(char *c)
 
 static void usage(void)
 {
-	fprintf(stderr, "Usage: %s [ -K /path/to/keytab] [-k /path/to/krb5.conf] [-E] [-t] [-v] [-l] [-e nsecs] key_serial\n", prog);
+	fprintf(stderr, "Usage: %s [ -K /path/to/keytab] [-k /path/to/krb5.conf] [-E] [-t] [-v] [-l] [-e nsecs] [-d] key_serial\n", prog);
 }
 
 static const struct option long_options[] = {
@@ -1124,6 +1128,7 @@ static const struct option long_options[] = {
 	{"keytab", 1, NULL, 'K'},
 	{"version", 0, NULL, 'v'},
 	{"expire", 1, NULL, 'e'},
+	{"debug", 0, NULL, 'd'},
 	{NULL, 0, NULL, 0}
 };
 
@@ -1154,7 +1159,7 @@ int main(const int argc, char *const argv[])
 
 	openlog(prog, 0, LOG_DAEMON);
 
-	while ((c = getopt_long(argc, argv, "cEk:K:ltve:", long_options, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "cEk:K:ltve:d", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'c':
 			/* legacy option -- skip it */
@@ -1184,6 +1189,11 @@ int main(const int argc, char *const argv[])
 			goto out;
 		case 'e':
 			expire_time = strtoul(optarg, NULL, 10);
+			break;
+		case 'd':
+			syslog(LOG_DEBUG, "cifs.upcall:pid=%d waiting %ds to debug...",
+			       getpid(), DEBUG_SLEEP);
+			sleep(DEBUG_SLEEP);
 			break;
 		default:
 			syslog(LOG_ERR, "unknown option: %c", c);

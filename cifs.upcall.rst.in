@@ -91,6 +91,11 @@ OPTIONS
 --version|-v
   Print version number and exit.
 
+--debug|-d
+  Print the PID of ``cifs.upcall`` in the system log and sleep a few
+  seconds before continuing. This allows for a debugger to be
+  attached.
+
 ************************
 CONFIGURATION FOR KEYCTL
 ************************

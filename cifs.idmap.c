@@ -44,6 +44,8 @@
 #include "cifsacl.h"
 #include "idmap_plugin.h"
 
+#define DEBUG_SLEEP 10
+
 static void *plugin_handle;
 
 static const char *prog = "cifs.idmap";
@@ -52,12 +54,13 @@ static const struct option long_options[] = {
 	{"help", 0, NULL, 'h'},
 	{"timeout", 1, NULL, 't'},
 	{"version", 0, NULL, 'v'},
+	{"debug", 0, NULL, 'd'},
 	{NULL, 0, NULL, 0}
 };
 
 static void usage(void)
 {
-	fprintf(stderr, "Usage: %s [-h] [-v] [-t timeout] key_serial\n", prog);
+	fprintf(stderr, "Usage: %s [-h] [-v] [-t timeout] [-d] key_serial\n", prog);
 }
 
 static char *
@@ -238,7 +241,7 @@ int main(const int argc, char *const argv[])
 
 	openlog(prog, 0, LOG_DAEMON);
 
-	while ((c = getopt_long(argc, argv, "ht:v",
+	while ((c = getopt_long(argc, argv, "ht:vd",
 					long_options, NULL)) != -1) {
 		switch (c) {
 		case 'h':
@@ -257,6 +260,11 @@ int main(const int argc, char *const argv[])
 			rc = 0;
 			printf("version: %s\n", VERSION);
 			goto out;
+		case 'd':
+			syslog(LOG_DEBUG, "cifs.idmap:pid=%d waiting %ds to debug...",
+			       getpid(), DEBUG_SLEEP);
+			sleep(DEBUG_SLEEP);
+			break;
 		default:
 			rc = EINVAL;
 			syslog(LOG_ERR, "unknown option: %c", c);
